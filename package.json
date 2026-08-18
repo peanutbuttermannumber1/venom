@@ -1,0 +1,14 @@
+{
+  "name": "venom",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "install:all": "npm install --prefix client && (cd server && python -m pip install -r requirements.txt)",
+    "run engine": "concurrently \"npm:run:client\" \"npm:run:server\"",
+    "run:client": "cd client && npm run dev",
+    "run:server": "cd server && uvicorn main:app --reload --port 8000"
+  },
+  "dependencies": {
+    "concurrently": "^8.0.0"
+  }
+}

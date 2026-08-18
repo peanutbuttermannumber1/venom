@@ -1,0 +1,9 @@
+# Byte-compiled / virtual env / env files
+.venv/
+__pycache__/
+node_modules/
+dist/
+.env
+.env.local
+faiss_index.bin
+faiss_meta.json
