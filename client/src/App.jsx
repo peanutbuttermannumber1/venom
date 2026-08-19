@@ -12,7 +12,9 @@ function Tabs({ tabs, active, onActivate, onNewTab, onClose }) {
           <button className="tab-close" onClick={() => onClose(i)}>×</button>
         </div>
       ))}
-      <button className="new-tab" onClick={onNewTab}>+</button>
+      <button className="new-tab" onClick={onNewTab} aria-label="New tab">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/></svg>
+      </button>
     </div>
   );
 }
@@ -44,12 +46,35 @@ function Results({ results, onUse }) {
   );
 }
 
-function ChatPanel({ systemGuidelines, setSystemGuidelines, selectedEvidence, onSendMessage, chatHistory, loading, captureScreen }) {
+function ChatPanel({ systemGuidelines, setSystemGuidelines, selectedEvidence, onSendMessage, chatHistory, loading, captureScreen, onGenerateSite }) {
   const [text, setText] = useState('');
   const send = async () => {
     if (!text.trim()) return;
     await onSendMessage(text);
     setText('');
+  };
+
+  const generateSite = async () => {
+    const topic = window.prompt('Enter a topic for the site (e.g., "How to start composting")');
+    if (!topic) return;
+    const tone = window.prompt('Tone (informative / casual / authoritative)', 'informative') || 'informative';
+    const length = window.prompt('Length (short / medium / long)', 'medium') || 'medium';
+    try {
+      const r = await axios.post(`${API_BASE}/api/build_site`, { topic, tone, length }, { responseType: 'blob' });
+      const blob = new Blob([r.data], { type: 'application/zip' });
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `dingo_site_${topic.replace(/\s+/g,'_').toLowerCase()}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+      alert('Site ZIP downloaded. Extract and deploy to your hosting provider.');
+    } catch (err) {
+      console.error(err);
+      alert('Failed to build site: ' + (err.response?.data || err.message));
+    }
   };
 
   return (
@@ -59,8 +84,9 @@ function ChatPanel({ systemGuidelines, setSystemGuidelines, selectedEvidence, on
           <label>AI Guidelines (system):</label>
           <textarea value={systemGuidelines} onChange={(e) => setSystemGuidelines(e.target.value)} placeholder="Write rules/instructions the AI should follow..." />
         </div>
-        <div style={{marginLeft:12}}>
+        <div style={{marginLeft:12, display:'flex', flexDirection:'column', gap:8}}>
           <button onClick={captureScreen} title="Capture visible app content">📸</button>
+          <button onClick={generateSite} title="Generate SEO-optimized site">🏗️</button>
         </div>
       </div>
       <div className="chat-history">
@@ -86,10 +112,11 @@ export default function App() {
   const [tabs, setTabs] = useState([{ title: 'Tab 1', query: '', results: [], selectedEvidence: [], chatHistory: [] }]);
   const [active, setActive] = useState(0);
   const [query, setQuery] = useState('');
-  const [systemGuidelines, setSystemGuidelines] = useState("You are a helpful assistant. Follow the user's guidelines. Do not generate content depicting severe violence. Do NOT produce image-generation outputs or attempt to call image APIs.");
+  const [systemGuidelines, setSystemGuidelines] = useState("You are a helpful assistant. Follow the user's guidelines. Do not generate content depicting severe violence. Do NOT produce image-generation outputs.");
   const [loading, setLoading] = useState(false);
   const [aiOpen, setAiOpen] = useState(false);
   const [screenCaptureText, setScreenCaptureText] = useState('');
+  const [dingoSummary, setDingoSummary] = useState(null);
 
   useEffect(() => {
     const saved = localStorage.getItem('dingo_tabs_v1');
@@ -107,11 +134,19 @@ export default function App() {
 
   const doSearch = async (q) => {
     setLoading(true);
+    setDingoSummary(null);
     try {
       const r = await axios.get(`${API_BASE}/api/search`, { params: { q }});
       const newTabs = [...tabs];
       newTabs[active] = { ...newTabs[active], query: q, results: r.data.results || [] };
       setTabs(newTabs);
+      // fetch dingo.ai-style summary and show above results
+      try {
+        const s = await axios.get(`${API_BASE}/api/summarize`, { params: { q }});
+        setDingoSummary(s.data);
+      } catch (err) {
+        console.warn('Dingo summary failed', err);
+      }
     } catch (err) {
       console.error(err);
     } finally {
@@ -130,7 +165,6 @@ export default function App() {
   };
 
   const captureScreen = () => {
-    // Gather a lightweight textual snapshot of the visible app state (not full OS screen capture)
     const tab = tabs[active];
     const parts = [];
     parts.push(`Active Tab: ${tab.title || 'Tab ' + (active+1)}`);
@@ -139,7 +173,6 @@ export default function App() {
     if (topResults) parts.push(`Top results:\n${topResults}`);
     const snapshot = parts.join('\n\n');
     setScreenCaptureText(snapshot);
-    // visual feedback
     alert('Screen snapshot captured and will be included in next AI request.');
   };
 
@@ -160,10 +193,10 @@ export default function App() {
       const newTabs = [...tabs];
       newTabs[active] = updatedTab;
       setTabs(newTabs);
-      // clear one-time screen capture after sending
       setScreenCaptureText('');
     } catch (err) {
       console.error(err);
+      alert('AI request failed: ' + (err.response?.data || err.message));
     } finally {
       setLoading(false);
     }
@@ -195,6 +228,13 @@ export default function App() {
         </div>
         <div className="content">
           {loading && <div className="loader">Loading...</div>}
+          {/* Dingo.ai summary card */}
+          {dingoSummary && (
+            <div className="dingo-card">
+              <div className="title">Dingo.ai — Quick summary</div>
+              <div className="summary">{dingoSummary.summary}</div>
+            </div>
+          )}
           <Results results={tab.results || []} onUse={onUseInAI} />
         </div>
       </div>
@@ -211,7 +251,18 @@ export default function App() {
         />
       )}
 
-      <button className="fab-ai" onClick={() => setAiOpen(!aiOpen)} title="Toggle Dingo AI">AI</button>
+      <button className="fab-ai" onClick={async () => {
+        // check health and open panel
+        try {
+          const h = await axios.get(`${API_BASE}/api/health`);
+          if (!h.data.llm.any) {
+            if (!confirm('No LLM configured. OpenAI key not set. Continue and use search-only features?')) return;
+          }
+        } catch (err) {
+          console.warn('Health check failed', err);
+        }
+        setAiOpen(!aiOpen);
+      }} title="Toggle Dingo AI">AI</button>
     </div>
   );
 }

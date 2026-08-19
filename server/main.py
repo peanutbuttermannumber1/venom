@@ -3,8 +3,13 @@ import re
 import json
 import time
 import hashlib
+import io
+import zipfile
+import threading
 from typing import List, Optional, Dict
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Body
+from fastapi.responses import StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import httpx
@@ -15,6 +20,7 @@ import requests
 # Lazy imports for heavy libraries (load on demand)
 _embedder = None
 faiss = None
+_embedder_lock = threading.Lock()
 
 load_dotenv()
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
@@ -28,6 +34,15 @@ INDEX_PATH = "faiss_index.bin"
 META_PATH = "faiss_meta.json"
 
 app = FastAPI(title="Dingo Search + AI (MVP)")
+
+# Allow CORS from local dev frontends
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000", "*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Simple domain whitelist for "trusted" badge
 TRUSTED_DOMAINS = {"wikipedia.org", "nytimes.com", "bbc.co.uk", "arxiv.org", "nature.com"}
@@ -47,39 +62,48 @@ meta = []
 # ---------- Lazy loaders ----------
 def ensure_embeddings_loaded():
     global _embedder, faiss, d, index, meta
+    # double-checked locking
     if _embedder is None:
-        from sentence_transformers import SentenceTransformer
-        import faiss as _faiss
-        _embedder = SentenceTransformer(EMB_MODEL_NAME)
-        faiss = _faiss
-        d = _embedder.get_sentence_embedding_dimension()
-        # initialize index
-        if os.path.exists(INDEX_PATH) and os.path.exists(META_PATH):
-            try:
-                index = faiss.read_index(INDEX_PATH)
-                with open(META_PATH, "r", encoding="utf-8") as f:
-                    meta = json.load(f)
-                print("FAISS index loaded, entries:", len(meta))
-            except Exception as e:
-                print("Failed to load existing FAISS index:", e)
-                index = faiss.IndexFlatIP(d)
-                meta = []
-        else:
-            index = faiss.IndexFlatIP(d)
-            meta = []
-        print("Embeddings and FAISS initialized")
+        with _embedder_lock:
+            if _embedder is None:
+                from sentence_transformers import SentenceTransformer
+                import faiss as _faiss
+                _embedder = SentenceTransformer(EMB_MODEL_NAME)
+                faiss = _faiss
+                d = _embedder.get_sentence_embedding_dimension()
+                # initialize index
+                if os.path.exists(INDEX_PATH) and os.path.exists(META_PATH):
+                    try:
+                        index = faiss.read_index(INDEX_PATH)
+                        with open(META_PATH, "r", encoding="utf-8") as f:
+                            meta = json.load(f)
+                        print("FAISS index loaded, entries:", len(meta))
+                    except Exception as e:
+                        print("Failed to load existing FAISS index:", e)
+                        index = faiss.IndexFlatIP(d)
+                        meta = []
+                else:
+                    index = faiss.IndexFlatIP(d)
+                    meta = []
+                print("Embeddings and FAISS initialized")
+
+
+def _write_index_files(idx, meta_list):
+    try:
+        faiss.write_index(idx, INDEX_PATH)
+        with open(META_PATH, "w", encoding="utf-8") as f:
+            json.dump(meta_list, f, ensure_ascii=False, indent=2)
+        print("FAISS index saved (background), entries:", len(meta_list))
+    except Exception as e:
+        print("Failed to save index in background:", e)
 
 
 def save_index():
     global index, meta
     if index is not None:
-        try:
-            faiss.write_index(index, INDEX_PATH)
-            with open(META_PATH, "w", encoding="utf-8") as f:
-                json.dump(meta, f, ensure_ascii=False, indent=2)
-            print("FAISS index saved, entries:", len(meta))
-        except Exception as e:
-            print("Failed to save index:", e)
+        # write in background to avoid blocking requests
+        t = threading.Thread(target=_write_index_files, args=(index, meta.copy()), daemon=True)
+        t.start()
 
 
 def embed_texts(texts: List[str]) -> np.ndarray:
@@ -104,7 +128,7 @@ def upsert_snippets(snippets: List[Dict]):
         s_copy["_index_id"] = start_id + i
         meta.append(s_copy)
     index.add(embs)
-    # save asynchronously may be ideal; keep simple here
+    # save asynchronously
     save_index()
 
 
@@ -242,7 +266,7 @@ def llm_available() -> Dict:
     return avail
 
 
-def call_openai_chat(messages: List[Dict], max_tokens=512, temperature=0.2):
+def call_openai_chat(messages: List[Dict], max_tokens=1024, temperature=0.2):
     if not OPENAI_KEY:
         raise RuntimeError("OpenAI key not configured")
     payload = {
@@ -252,7 +276,7 @@ def call_openai_chat(messages: List[Dict], max_tokens=512, temperature=0.2):
         "temperature": temperature
     }
     headers = {"Authorization": f"Bearer {OPENAI_KEY}", "Content-Type": "application/json"}
-    r = requests.post("https://api.openai.com/v1/chat/completions", headers=headers, json=payload, timeout=30)
+    r = requests.post("https://api.openai.com/v1/chat/completions", headers=headers, json=payload, timeout=120)
     if r.status_code != 200:
         raise RuntimeError(f"OpenAI error {r.status_code}: {r.text}")
     j = r.json()
@@ -276,7 +300,7 @@ def call_hf_text(payload_text: str):
 def call_local_tgi(prompt: str):
     if not TGI_URL:
         raise RuntimeError("TGI_URL not configured for local backend")
-    r = requests.post(TGI_URL.rstrip("/") + "/generate", json={"prompt": prompt, "max_new_tokens": 512}, timeout=60)
+    r = requests.post(TGI_URL.rstrip("/") + "/generate", json={"prompt": prompt, "max_new_tokens": 1024}, timeout=120)
     if r.status_code != 200:
         raise RuntimeError(f"TGI error {r.status_code}: {r.text}")
     return r.json().get("generated_text", "")
@@ -285,8 +309,8 @@ def call_local_tgi(prompt: str):
 def run_llm(with_messages: List[Dict], concatenated_evidence: str, system_guidelines: str):
     # Build a clear instruction that forces citing evidence blocks and respects guidelines
     instruction = (
-        "Using only the evidence blocks below, answer the user's last question concisely and include numeric citations like [E1], [E2]. "
-        "If evidence doesn't support a claim, say 'no reliable source found'. Do not invent facts."
+        "You are Dingo.ai, a helpful assistant that summarizes high-quality sources. Using only the evidence blocks below, answer the user's last question concisely and include numeric citations like [E1], [E2]. "
+        "If evidence doesn't support a claim, say 'no reliable source found'. Do not invent facts. Do not produce image-generation requests."
         "\n\nEvidence:\n" + concatenated_evidence + "\n\nNow answer:"
     )
     messages = []
@@ -360,11 +384,9 @@ def api_health():
     """Return basic health and LLM/embeddings readiness information."""
     emb_ready = False
     try:
-        # only check whether model files could be loaded without forcing download
         if _embedder is not None:
             emb_ready = True
         else:
-            # don't block by loading model, just indicate not loaded
             emb_ready = False
     except Exception:
         emb_ready = False
@@ -380,6 +402,7 @@ async def api_search(q: str = Query(..., min_length=1)):
     if cached is not None:
         return {"query": q, "results": cached}
 
+    # Knowledge-first profile: prioritize wiki and news for general queries
     ddg = ddg_search(q, max_results=6)
     wiki = wiki_search(q, max_results=3)
     news = newsapi_search(q, max_results=2)
@@ -395,6 +418,7 @@ async def api_search(q: str = Query(..., min_length=1)):
         it["trust"] = trust_score_for_domain(it.get("domain", ""))
         unique.append(it)
     upsert_snippets(unique)
+    # reorder: prefer trusted domains then highest trust then recency heuristic (not implemented fully)
     unique.sort(key=lambda x: (-x.get("trust", 0.0)))
     resp_items = []
     for u in unique[:20]:
@@ -402,6 +426,50 @@ async def api_search(q: str = Query(..., min_length=1)):
     # cache combined results briefly
     cached_store(cache_key, resp_items)
     return {"query": q, "results": resp_items}
+
+
+@app.get("/api/summarize")
+def api_summarize(q: str = Query(..., min_length=1)):
+    """Produce a Dingo.ai style summary of top retrieved evidence for a query."""
+    # perform same retrieval as search but focused and deduped
+    ddg = ddg_search(q, max_results=6)
+    wiki = wiki_search(q, max_results=3)
+    news = newsapi_search(q, max_results=2)
+    combined = ddg + wiki + news
+    seen = set()
+    unique = []
+    for it in combined:
+        if not it.get("url"):
+            continue
+        if it["url"] in seen:
+            continue
+        seen.add(it["url"])
+        it["trust"] = trust_score_for_domain(it.get("domain", ""))
+        unique.append(it)
+    # upsert snippets for vector retrieval
+    upsert_snippets(unique)
+    # retrieve top evidence from vector db for the query
+    evidence = []
+    try:
+        retrieved = search_vector(q, top_k=6)
+    except Exception:
+        retrieved = []
+    for r in retrieved:
+        evidence.append({"title": r.get("title"), "url": r.get("url"), "snippet": r.get("snippet"), "trust": r.get("trust", 0.5)})
+
+    concatenated = ""
+    for i, e in enumerate(evidence, start=1):
+        concatenated += f"[E{i}] {e.get('title','')}\nURL: {e.get('url')}\nSnippet: {e.get('snippet','')}\n\n"
+
+    # ask LLM to summarize
+    user_messages = [{"role": "user", "content": q}]
+    system_guidelines = "You are Dingo.ai, a concise summarizer. Cite evidence like [E1]. Do not invent facts."
+    try:
+        summary = run_llm(user_messages, concatenated, system_guidelines)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+    return {"query": q, "summary": summary, "evidence": evidence}
 
 
 @app.get("/api/retrieve")
@@ -455,7 +523,6 @@ def api_chat(req: ChatRequest):
     try:
         ans = run_llm(req.messages, concatenated, req.systemGuidelines or "")
     except Exception as exc:
-        # If LLM fails, return a helpful message explaining why and include concatenated evidence as fallback
         fallback = "\n\n".join([f"{i+1}. {e.get('title','')} - {e.get('snippet','')} ({e.get('url')})" for i, e in enumerate(evidence_blocks)])
         raise HTTPException(status_code=503, detail=f"LLM error: {str(exc)}. Fallback evidence:\n{fallback}")
 
@@ -463,3 +530,83 @@ def api_chat(req: ChatRequest):
     for i, e in enumerate(evidence_blocks, start=1):
         citations.append({"label": f"[E{i}]", "url": e.get("url"), "title": e.get("title"), "snippet": e.get("snippet"), "trust": e.get("trust")})
     return {"answer": ans, "citations": citations}
+
+
+@app.post("/api/build_site")
+def api_build_site(payload: Dict = Body(...)):
+    """Build a static SEO-optimized site for a given topic and return a ZIP.
+    Expected payload: { "topic": "...", "tone": "...", "length": "short|medium|long" }
+    """
+    topic = payload.get("topic")
+    if not topic:
+        raise HTTPException(status_code=400, detail="Missing topic")
+    tone = payload.get("tone", "informative")
+    length = payload.get("length", "medium")
+
+    # retrieve knowledge-first evidence
+    ddg = ddg_search(topic, max_results=6)
+    wiki = wiki_search(topic, max_results=4)
+    news = newsapi_search(topic, max_results=3)
+    combined = ddg + wiki + news
+    seen = set()
+    unique = []
+    for it in combined:
+        if not it.get("url"):
+            continue
+        if it["url"] in seen:
+            continue
+        seen.add(it["url"])
+        it["trust"] = trust_score_for_domain(it.get("domain", ""))
+        unique.append(it)
+    upsert_snippets(unique)
+
+    # gather evidence for LLM
+    retrieved = []
+    try:
+        retrieved = search_vector(topic, top_k=8)
+    except Exception:
+        retrieved = []
+    evidence_text = ""
+    for i, r in enumerate(retrieved, start=1):
+        evidence_text += f"[E{i}] {r.get('title','')}\nURL: {r.get('url')}\nSnippet: {r.get('snippet','')}\n\n"
+
+    # prompt LLM to output a JSON structure of files for the static site
+    system_guidelines = ("You are Dingo.ai, an assistant that generates high-quality, SEO-optimized static sites. "
+                         "Produce a JSON object with a top-level 'files' array where each entry is {\"path\": ..., \"content\": ...}. "
+                         "Only return valid JSON. Include index.html, styles.css, and optionally other assets. Keep content original and cite evidence where appropriate.")
+    user_prompt = (
+        f"Generate a static site for the topic: {topic}. Tone: {tone}. Length: {length}. "
+        f"Use the evidence below to ground facts. Evidence:\n{evidence_text}\n\nReturn only a JSON object with 'files'."
+    )
+
+    try:
+        llm_out = run_llm([{"role": "user", "content": user_prompt}], evidence_text, system_guidelines)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"LLM error building site: {exc}")
+
+    files = None
+    try:
+        # Attempt to parse JSON from LLM output
+        files_obj = json.loads(llm_out)
+        files = files_obj.get("files")
+    except Exception:
+        # fallback: create a single index.html with the LLM output as content
+        index_html = f"<html><head><meta charset=\"utf-8\"><title>{topic}</title></head><body><pre>{html_escape(llm_out)}</pre></body></html>"
+        files = [{"path": "index.html", "content": index_html}]
+
+    # build ZIP in-memory
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for f in files:
+            path = f.get("path")
+            content = f.get("content")
+            if not path or content is None:
+                continue
+            zf.writestr(path, content)
+    buf.seek(0)
+    return StreamingResponse(buf, media_type="application/zip", headers={"Content-Disposition": f"attachment; filename=site_{hashlib.sha1(topic.encode()).hexdigest()[:8]}.zip"})
+
+
+# small helper for fallback
+def html_escape(s: str) -> str:
+    return (s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;'))
