@@ -1,0 +1,9 @@
+{
+  "name": "server",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "start": "python -m uvicorn main:app --reload --port 8000",
+    "install:py": "python -m pip install -r requirements.txt"
+  }
+}

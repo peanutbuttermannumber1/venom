@@ -1,4 +1,4 @@
-# Dingo Search + AI (RAG) — Local MVP
+# Dingo Search + AI (RAG) — Local MVP (updated run instructions)
 
 What this is
 - A local prototype search frontend renamed to "Dingo Search" that aggregates DuckDuckGo + Wikipedia (+ optional NewsAPI).
@@ -11,38 +11,36 @@ Prereqs
 - Optionally Docker if you want to run a local text-generation-inference (TGI) server for private LLM inference.
 
 Quick start (dev)
-1. Install server deps:
+1. From the project root, install both client JS deps and server Python deps (this will run automatically before the app starts):
+   npm start
+
+   The `prestart` script runs `npm run install:all` which installs client npm packages and server Python requirements.
+
+2. If you prefer manual install:
+   - Install server Python deps:
+     cd server
+     python -m venv .venv
+     source .venv/bin/activate   # Windows: .venv\\Scripts\\activate
+     python -m pip install -r requirements.txt
+
+   - Install client deps:
+     cd ../client
+     npm install
+
+3. Start backend (if running manually):
    cd server
-   python -m venv .venv
-   source .venv/bin/activate   # Windows: .venv\\Scripts\\activate
-   pip install -r requirements.txt
+   python -m uvicorn main:app --reload --port 8000
 
-2. Install client deps:
-   cd ../client
-   npm install
-
-3. Configure environment:
-   cp ../server/.env.example ../server/.env
-   Edit server/.env and add keys if you want OpenAI or NewsAPI. If you want purely local LLM, leave OPENAI_API_KEY empty and follow README section on local LLM.
-
-4. Start backend:
-   cd ../server
-   source .venv/bin/activate
-   uvicorn main:app --reload --port 8000
-
-5. Start frontend:
-   cd ../client
+4. Start frontend (if running manually):
+   cd client
    npm run dev
-   Open the Vite URL printed (default http://localhost:5173)
 
 Notes
-- Embeddings are computed locally using SentenceTransformers; first runs may download models.
-- FAISS index saved under server/faiss_index.* files.
-- Legal: scraping should respect robots.txt and site terms; this is a prototype only.
+- If you see errors about `vite` or `uvicorn` not found, make sure you've completed the install step. The automated `npm start` runs the install step first.
+- `npm start` will run both the frontend (Vite dev) and the backend (uvicorn) concurrently.
 
-Privacy options
-- Default: local embeddings + FAISS; LLM via OpenAI unless configured otherwise.
-- To use Hugging Face Inference API: set HUGGINGFACE_API_TOKEN and MODEL_BACKEND=hf.
-- To use a local TGI server: set MODEL_BACKEND=local and TGI_URL to your TGI endpoint. See server/README section for TGI example.
+Privacy & options
+- Embeddings are computed locally using SentenceTransformers by default; model downloads happen on first use.
+- To avoid external LLMs, set MODEL_BACKEND=local and run a local TGI instance; see server/.env.example.
 
-If you want, I can further customize the repo, add Docker Compose, or change the default LLM backend to local-only.
+If you want me to change the startup behavior (e.g., separate containers, Docker Compose), I can add Docker files next.

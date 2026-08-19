@@ -4,9 +4,11 @@
   "private": true,
   "scripts": {
     "install:all": "npm install --prefix client && (cd server && python -m pip install -r requirements.txt)",
-    "run engine": "concurrently \"npm:run:client\" \"npm:run:server\"",
-    "run:client": "cd client && npm run dev",
-    "run:server": "cd server && uvicorn main:app --reload --port 8000"
+    "prestart": "npm run install:all",
+    "start": "concurrently \"npm --prefix client run dev\" \"npm --prefix server run start\"",
+    "dev": "npm run start",
+    "start:client": "npm --prefix client run dev",
+    "start:server": "npm --prefix server run start"
   },
   "dependencies": {
     "concurrently": "^8.0.0"
