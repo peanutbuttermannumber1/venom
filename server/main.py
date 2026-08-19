@@ -18,6 +18,7 @@ faiss = None
 
 load_dotenv()
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-3.5-turbo")
 HF_TOKEN = os.getenv("HUGGINGFACE_API_TOKEN")
 MODEL_BACKEND = os.getenv("MODEL_BACKEND", "openai")  # openai | hf | local
 TGI_URL = os.getenv("TGI_URL")
@@ -68,6 +69,7 @@ def ensure_embeddings_loaded():
             meta = []
         print("Embeddings and FAISS initialized")
 
+
 def save_index():
     global index, meta
     if index is not None:
@@ -79,12 +81,14 @@ def save_index():
         except Exception as e:
             print("Failed to save index:", e)
 
+
 def embed_texts(texts: List[str]) -> np.ndarray:
     ensure_embeddings_loaded()
     # use the embedder to encode
     embs = _embedder.encode(texts, show_progress_bar=False, convert_to_numpy=True)
     faiss.normalize_L2(embs)
     return embs
+
 
 def upsert_snippets(snippets: List[Dict]):
     """snippets: [{id,title,url,snippet,domain}]"""
@@ -102,6 +106,7 @@ def upsert_snippets(snippets: List[Dict]):
     index.add(embs)
     # save asynchronously may be ideal; keep simple here
     save_index()
+
 
 def search_vector(query: str, top_k: int = 5):
     ensure_embeddings_loaded()
@@ -125,6 +130,7 @@ def cached_fetch(key: str):
         SEARCH_CACHE.pop(key, None)
         return None
     return entry["value"]
+
 
 def cached_store(key: str, value):
     SEARCH_CACHE[key] = {"ts": time.time(), "value": value}
@@ -226,11 +232,21 @@ def newsapi_search(query: str, max_results=5):
         return []
 
 # ---------- LLM wrappers ----------
+
+def llm_available() -> Dict:
+    """Return a dict describing which LLM backends are configured and ready."""
+    avail = {"openai": bool(OPENAI_KEY), "hf": bool(HF_TOKEN), "local": bool(MODEL_BACKEND == "local" and bool(TGI_URL))}
+    # overall availability
+    avail["any"] = avail["openai"] or avail["hf"] or avail["local"]
+    avail["model"] = os.getenv("OPENAI_MODEL", OPENAI_MODEL) if avail["openai"] else (os.getenv("HF_API_URL") if avail["hf"] else (TGI_URL if avail["local"] else None))
+    return avail
+
+
 def call_openai_chat(messages: List[Dict], max_tokens=512, temperature=0.2):
     if not OPENAI_KEY:
         raise RuntimeError("OpenAI key not configured")
     payload = {
-        "model": "gpt-3.5-turbo",
+        "model": OPENAI_MODEL,
         "messages": messages,
         "max_tokens": max_tokens,
         "temperature": temperature
@@ -279,6 +295,9 @@ def run_llm(with_messages: List[Dict], concatenated_evidence: str, system_guidel
     for m in with_messages:
         messages.append(m)
     messages.append({"role": "system", "content": instruction})
+    avail = llm_available()
+    if not avail.get("any"):
+        raise RuntimeError("No LLM backend configured. Set OPENAI_API_KEY or HUGGINGFACE_API_TOKEN or configure local TGI.")
     if MODEL_BACKEND == "openai" and OPENAI_KEY:
         return call_openai_chat(messages)
     elif MODEL_BACKEND == "hf" and HF_TOKEN:
@@ -288,7 +307,16 @@ def run_llm(with_messages: List[Dict], concatenated_evidence: str, system_guidel
         prompt = "\n".join([m.get("content", "") for m in messages])
         return call_local_tgi(prompt)
     else:
-        raise RuntimeError("No LLM backend configured. Set OPENAI_API_KEY or HUGGINGFACE_API_TOKEN or configure local TGI.")
+        # fallback to any available
+        if OPENAI_KEY:
+            return call_openai_chat(messages)
+        if HF_TOKEN:
+            prompt = "\n".join([m.get("content", "") for m in messages])
+            return call_hf_text(prompt)
+        if MODEL_BACKEND == "local" and TGI_URL:
+            prompt = "\n".join([m.get("content", "") for m in messages])
+            return call_local_tgi(prompt)
+        raise RuntimeError("No supported LLM backend could be used.")
 
 # ---------- Utility ----------
 def trust_score_for_domain(domain: str) -> float:
@@ -297,6 +325,9 @@ def trust_score_for_domain(domain: str) -> float:
     for d in TRUSTED_DOMAINS:
         if d in domain:
             return 0.95
+    # deprioritize code hosting domains to avoid code-only results
+    if domain and ("github.com" in domain or "gitlab.com" in domain or "bitbucket.org" in domain):
+        return 0.2
     return 0.5
 
 # ---------- API models ----------
@@ -324,6 +355,23 @@ class ChatResponse(BaseModel):
     citations: List[Dict]
 
 # ---------- Endpoints ----------
+@app.get("/api/health")
+def api_health():
+    """Return basic health and LLM/embeddings readiness information."""
+    emb_ready = False
+    try:
+        # only check whether model files could be loaded without forcing download
+        if _embedder is not None:
+            emb_ready = True
+        else:
+            # don't block by loading model, just indicate not loaded
+            emb_ready = False
+    except Exception:
+        emb_ready = False
+    llm = llm_available()
+    return {"embeddings_loaded": emb_ready, "llm": llm}
+
+
 @app.get("/api/search", response_model=SearchResponse)
 async def api_search(q: str = Query(..., min_length=1)):
     # Try cache first across connectors
@@ -355,6 +403,7 @@ async def api_search(q: str = Query(..., min_length=1)):
     cached_store(cache_key, resp_items)
     return {"query": q, "results": resp_items}
 
+
 @app.get("/api/retrieve")
 def api_retrieve(url: str):
     try:
@@ -367,6 +416,7 @@ def api_retrieve(url: str):
         return {"url": url, "text": text}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.post("/api/chat", response_model=ChatResponse)
 def api_chat(req: ChatRequest):
@@ -405,7 +455,9 @@ def api_chat(req: ChatRequest):
     try:
         ans = run_llm(req.messages, concatenated, req.systemGuidelines or "")
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        # If LLM fails, return a helpful message explaining why and include concatenated evidence as fallback
+        fallback = "\n\n".join([f"{i+1}. {e.get('title','')} - {e.get('snippet','')} ({e.get('url')})" for i, e in enumerate(evidence_blocks)])
+        raise HTTPException(status_code=503, detail=f"LLM error: {str(exc)}. Fallback evidence:\n{fallback}")
 
     citations = []
     for i, e in enumerate(evidence_blocks, start=1):
