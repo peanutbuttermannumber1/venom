@@ -20,7 +20,7 @@ function Tabs({ tabs, active, onActivate, onNewTab, onClose }) {
 function SearchBar({ onSearch, value, setValue }) {
   return (
     <form className="searchbar" onSubmit={(e) => { e.preventDefault(); onSearch(value); }}>
-      <input value={value} onChange={(e) => setValue(e.target.value)} placeholder="Search (DuckDuckGo-friendly)..." />
+      <input value={value} onChange={(e) => setValue(e.target.value)} placeholder="Search Dingo (privacy-friendly)..." />
       <button type="submit">Search</button>
     </form>
   );
@@ -86,7 +86,7 @@ export default function App() {
 
   useEffect(() => {
     // load saved tabs if any
-    const saved = localStorage.getItem('ducklike_tabs_v1');
+    const saved = localStorage.getItem('dingo_tabs_v1');
     if (saved) {
       try {
         const parsed = JSON.parse(saved);
@@ -96,7 +96,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    localStorage.setItem('ducklike_tabs_v1', JSON.stringify(tabs));
+    localStorage.setItem('dingo_tabs_v1', JSON.stringify(tabs));
   }, [tabs]);
 
   const doSearch = async (q) => {

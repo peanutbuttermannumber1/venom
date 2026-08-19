@@ -1,7 +1,7 @@
-# DuckLike Search + AI (RAG) — Local MVP
+# Dingo Search + AI (RAG) — Local MVP
 
 What this is
-- A local prototype search frontend that aggregates DuckDuckGo + Wikipedia (+ optional NewsAPI).
+- A local prototype search frontend renamed to "Dingo Search" that aggregates DuckDuckGo + Wikipedia (+ optional NewsAPI).
 - Right-side AI assistant that follows a customizable "Guidelines" system prompt and synthesizes answers from retrieved evidence.
 - Local embeddings (sentence-transformers) + FAISS for retrieval; LLM adapter supports OpenAI, Hugging Face Inference, or local TGI.
 
@@ -45,4 +45,4 @@ Privacy options
 - To use Hugging Face Inference API: set HUGGINGFACE_API_TOKEN and MODEL_BACKEND=hf.
 - To use a local TGI server: set MODEL_BACKEND=local and TGI_URL to your TGI endpoint. See server/README section for TGI example.
 
-If you want, I can push this project to a GitHub repo for you. Ask and tell me the repo name and visibility.
+If you want, I can further customize the repo, add Docker Compose, or change the default LLM backend to local-only.
