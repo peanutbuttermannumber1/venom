@@ -44,7 +44,7 @@ function Results({ results, onUse }) {
   );
 }
 
-function ChatPanel({ systemGuidelines, setSystemGuidelines, selectedEvidence, onSendMessage, chatHistory, loading }) {
+function ChatPanel({ systemGuidelines, setSystemGuidelines, selectedEvidence, onSendMessage, chatHistory, loading, captureScreen }) {
   const [text, setText] = useState('');
   const send = async () => {
     if (!text.trim()) return;
@@ -54,9 +54,14 @@ function ChatPanel({ systemGuidelines, setSystemGuidelines, selectedEvidence, on
 
   return (
     <div className="chatpanel">
-      <div className="chat-guidelines">
-        <label>AI Guidelines (system):</label>
-        <textarea value={systemGuidelines} onChange={(e) => setSystemGuidelines(e.target.value)} placeholder="Write rules/instructions the AI should follow..." />
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+        <div className="chat-guidelines" style={{flex:1}}>
+          <label>AI Guidelines (system):</label>
+          <textarea value={systemGuidelines} onChange={(e) => setSystemGuidelines(e.target.value)} placeholder="Write rules/instructions the AI should follow..." />
+        </div>
+        <div style={{marginLeft:12}}>
+          <button onClick={captureScreen} title="Capture visible app content">📸</button>
+        </div>
       </div>
       <div className="chat-history">
         {chatHistory.map((m, i) => (
@@ -81,11 +86,12 @@ export default function App() {
   const [tabs, setTabs] = useState([{ title: 'Tab 1', query: '', results: [], selectedEvidence: [], chatHistory: [] }]);
   const [active, setActive] = useState(0);
   const [query, setQuery] = useState('');
-  const [systemGuidelines, setSystemGuidelines] = useState("You are a helpful assistant. Follow the user's guidelines.");
+  const [systemGuidelines, setSystemGuidelines] = useState("You are a helpful assistant. Follow the user's guidelines. Do not generate content depicting severe violence. Do NOT produce image-generation outputs or attempt to call image APIs.");
   const [loading, setLoading] = useState(false);
+  const [aiOpen, setAiOpen] = useState(false);
+  const [screenCaptureText, setScreenCaptureText] = useState('');
 
   useEffect(() => {
-    // load saved tabs if any
     const saved = localStorage.getItem('dingo_tabs_v1');
     if (saved) {
       try {
@@ -116,7 +122,6 @@ export default function App() {
   const onUseInAI = (item) => {
     const newTabs = [...tabs];
     const t = newTabs[active];
-    // avoid duplicates
     if (!t.selectedEvidence.some(s => s.id === item.id)) {
       t.selectedEvidence = [...t.selectedEvidence, item];
       newTabs[active] = t;
@@ -124,23 +129,39 @@ export default function App() {
     }
   };
 
+  const captureScreen = () => {
+    // Gather a lightweight textual snapshot of the visible app state (not full OS screen capture)
+    const tab = tabs[active];
+    const parts = [];
+    parts.push(`Active Tab: ${tab.title || 'Tab ' + (active+1)}`);
+    if (tab.query) parts.push(`Query: ${tab.query}`);
+    const topResults = (tab.results || []).slice(0,5).map(r => `- ${r.title} (${r.url})`).join('\n');
+    if (topResults) parts.push(`Top results:\n${topResults}`);
+    const snapshot = parts.join('\n\n');
+    setScreenCaptureText(snapshot);
+    // visual feedback
+    alert('Screen snapshot captured and will be included in next AI request.');
+  };
+
   const onSendMessage = async (text) => {
     setLoading(true);
     try {
       const tab = tabs[active];
       const newHistory = [...tab.chatHistory, { role: 'user', content: text }];
-      // prepare selectedEvidence ids
       const selectedIds = tab.selectedEvidence.map(s => s.id);
       const r = await axios.post(`${API_BASE}/api/chat`, {
         messages: newHistory,
         systemGuidelines,
-        selectedEvidenceIds: selectedIds
+        selectedEvidenceIds: selectedIds,
+        screen_text: screenCaptureText || ''
       });
       const assistant = r.data.answer;
       const updatedTab = { ...tab, chatHistory: [...newHistory, { role: 'assistant', content: assistant }] };
       const newTabs = [...tabs];
       newTabs[active] = updatedTab;
       setTabs(newTabs);
+      // clear one-time screen capture after sending
+      setScreenCaptureText('');
     } catch (err) {
       console.error(err);
     } finally {
@@ -178,14 +199,19 @@ export default function App() {
         </div>
       </div>
 
-      <ChatPanel
-        systemGuidelines={systemGuidelines}
-        setSystemGuidelines={setSystemGuidelines}
-        selectedEvidence={tab.selectedEvidence || []}
-        onSendMessage={async (text) => await onSendMessage(text)}
-        chatHistory={tab.chatHistory || []}
-        loading={loading}
-      />
+      {aiOpen && (
+        <ChatPanel
+          systemGuidelines={systemGuidelines}
+          setSystemGuidelines={setSystemGuidelines}
+          selectedEvidence={tab.selectedEvidence || []}
+          onSendMessage={async (text) => await onSendMessage(text)}
+          chatHistory={tab.chatHistory || []}
+          loading={loading}
+          captureScreen={captureScreen}
+        />
+      )}
+
+      <button className="fab-ai" onClick={() => setAiOpen(!aiOpen)} title="Toggle Dingo AI">AI</button>
     </div>
   );
 }
