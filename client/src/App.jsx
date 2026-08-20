@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 
-const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
+// Use relative base by default so the app works when served from the same origin
+const API_BASE = import.meta.env.VITE_API_BASE || '';
 
 function Tabs({ tabs, active, onActivate, onNewTab, onClose }) {
   return (
